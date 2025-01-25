@@ -14,3 +14,21 @@
 2. Убедитесь, что Python установлен правильно, выполнив в терминале или командной строке:
    ```bash
    python --version
+### Установка зависимостей
+
+После установки Python вам нужно будет установить зависимости, указанные в файле requirements.txt
+
+1. Клонируйте репозиторий:
+   ```bash
+   git clone https://github.com/jobeffeck2284/mangalibdownloader.git
+   cd mangalibdownloader
+2. Установите зависимости:
+   ```bash
+   pip install -r requirements.txt
+### Установка зависимостей
+
+После установки всех зависимостей, вы можете запустить приложение:
+   ```bash
+   python app.py
+
+
