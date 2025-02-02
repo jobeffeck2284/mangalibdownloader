@@ -1,23 +1,32 @@
-import sys
+import logging
 import os
-import requests
+import sys
 from datetime import datetime
+
+import requests
+from PIL import Image
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt6.QtGui import (
+    QColor, QTextCursor, QTextCharFormat, QPalette, QPixmap,
+    QAction
+)
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QLineEdit, QPushButton,
     QTextEdit, QWidget, QComboBox, QHBoxLayout, QTableWidget,
     QTableWidgetItem, QHeaderView, QLabel, QSplitter, QDialog,
-    QSizePolicy, QSpacerItem, QMessageBox, QMenu
+    QMessageBox, QMenu, QTreeWidget, QTreeWidgetItem, QFileDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import (
-    QColor, QTextCursor, QTextCharFormat, QPalette, QPixmap,
-    QImage, QPainter, QAction
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.FileHandler('manga_downloader.log'),
+        logging.StreamHandler()
+    ]
 )
-from PyQt6.QtGui import QGuiApplication
-from PIL import Image
-from io import BytesIO
-import logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Обновлённые стили
 LIGHT_THEME = """
@@ -53,11 +62,27 @@ LIGHT_THEME = """
     }
     QTableWidget {
         gridline-color: #E0E0E0;
-        font-size: 12px;
+        font-size: 13px;
+        border: 1px solid #E0E0E0;
+        border-radius: 6px;
     }
     QHeaderView::section {
-        background-color: #F5F5F5;
-        padding: 4px;
+        background-color: #F8F9FA;
+        padding: 8px;
+        border: none;
+        border-bottom: 2px solid #E0E0E0;
+        font-weight: 500;
+    }
+    QTableWidget::item {
+        padding: 6px;
+    }
+    QTableWidget::item:selected {
+        background-color: #FF6B35;
+        color: white;
+    }
+    QLineEdit[readOnly="true"] {
+        background-color: #F8F9FA;
+        color: #666666;
     }
 """
 
@@ -98,11 +123,24 @@ DARK_THEME = """
     }
     QTableWidget {
         gridline-color: #404040;
-        font-size: 12px;
+        font-size: 13px;
+        border: 1px solid #404040;
+        border-radius: 6px;
     }
     QHeaderView::section {
         background-color: #353535;
-        padding: 4px;
+        padding: 8px;
+        border: none;
+        border-bottom: 2px solid #404040;
+        font-weight: 500;
+    }
+    QTableWidget::item:selected {
+        background-color: #FF6B35;
+        color: white;
+    }
+    QLineEdit[readOnly="true"] {
+        background-color: #404040;
+        color: #AAAAAA;
     }
 """
 
@@ -143,11 +181,12 @@ class DownloadThread(QThread):
     log_signal = pyqtSignal(str, str)
     finished_signal = pyqtSignal(str)
 
-    def __init__(self, slug_url, volume_number, chapter_number, parent=None):
+    def __init__(self, slug_url, volume_number, chapter_number, save_directory, parent=None):
         super().__init__(parent)
         self.slug_url = slug_url
         self.volume_number = volume_number
         self.chapter_number = chapter_number
+        self.save_directory = save_directory
 
     def run(self):
         try:
@@ -157,7 +196,12 @@ class DownloadThread(QThread):
             volume_folder = f"Volume_{self.volume_number}"
             chapter_folder = f"Chapter_{self.chapter_number}"
 
-            save_dir = os.path.join(os.path.dirname(__file__), "manga", folder_name, volume_folder, chapter_folder)
+            save_dir = os.path.join(
+                self.save_directory,
+                folder_name,
+                volume_folder,
+                chapter_folder
+            )
             os.makedirs(save_dir, exist_ok=True)
 
             self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] Поиск страниц...", "info")
@@ -267,6 +311,7 @@ class MangaDownloaderApp(QMainWindow):
         self.current_theme = "light"
         self.last_save_dir = ""
         self.manga_cache = {}
+        self.chapter_threads = []  # Добавьте эту строку
         self.loader_threads = []  # Список для хранения ссылок на потоки
         self.init_ui()
         self.apply_theme(LIGHT_THEME)
@@ -311,7 +356,6 @@ class MangaDownloaderApp(QMainWindow):
         self.manga_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # Изменён режим изменения размеров
         self.manga_table.verticalHeader().setVisible(False)
         self.manga_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.manga_table.doubleClicked.connect(self.select_manga)
         self.manga_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)  # Включаем контекстное меню
         self.manga_table.customContextMenuRequested.connect(self.show_context_menu)
         search_layout.addWidget(self.manga_table)
@@ -319,6 +363,16 @@ class MangaDownloaderApp(QMainWindow):
         # Нижняя панель загрузки
         download_panel = QWidget()
         download_layout = QVBoxLayout(download_panel)
+
+        directory_layout = QHBoxLayout()
+        self.directory_input = QLineEdit()
+        self.directory_input.setReadOnly(True)
+        self.directory_input.setPlaceholderText("Папка для сохранения не выбрана")
+        self.directory_button = QPushButton("Выбрать папку")
+        self.directory_button.clicked.connect(self.select_directory)
+        directory_layout.addWidget(self.directory_input)
+        directory_layout.addWidget(self.directory_button)
+        download_layout.insertLayout(0, directory_layout)  # Добавляем в начало
 
         # Поля ввода
         input_layout = QVBoxLayout()
@@ -359,6 +413,16 @@ class MangaDownloaderApp(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.addWidget(main_splitter)
 
+    def select_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения")
+        if directory:
+            self.save_directory = directory
+            self.directory_input.setText(directory)
+            settings = QSettings("MangaDownloader", "AppSettings")
+            settings.setValue("save_directory", directory)
+
+
+
     def apply_theme(self, style_sheet):
         self.setStyleSheet(style_sheet)
         palette = self.palette()
@@ -391,6 +455,10 @@ class MangaDownloaderApp(QMainWindow):
         self.log_output.moveCursor(QTextCursor.MoveOperation.End)
 
     def start_download(self):
+        if not self.save_directory:
+            self.log_message("Сначала выберите папку для сохранения!", "error")
+            return
+
         slug = self.slug_input.text().strip()
         volume = self.volume_input.text().strip()
         chapter = self.chapter_input.text().strip()
@@ -404,7 +472,7 @@ class MangaDownloaderApp(QMainWindow):
         self.log_message(
             f"[{datetime.now().strftime('%H:%M:%S')}] Начало загрузки: {slug} Том {volume} Глава {chapter}", "info")
 
-        self.thread = DownloadThread(slug, volume, chapter)
+        self.thread = DownloadThread(slug, volume, chapter, self.save_directory)
         self.thread.log_signal.connect(self.log_message)
         self.thread.finished_signal.connect(self.on_download_finished)
         self.thread.start()
@@ -451,10 +519,23 @@ class MangaDownloaderApp(QMainWindow):
         try:
             self.manga_table.setRowCount(len(manga_list))
             self.manga_cache.clear()
+            row_height = 160  # Высота строки = высота изображения + отступы
 
             for row, manga in enumerate(manga_list):
-                if not all(key in manga for key in ['slug_url', 'type', 'status']):
-                    continue
+                self.manga_table.setRowHeight(row, row_height)  # Установка фиксированной высоты
+
+                # Создаем QLabel с фиксированным размером
+                image_label = QLabel()
+                image_label.setFixedSize(120, 150)  # Увеличим ширину для лучшего отображения
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                image_label.setStyleSheet("""
+                    QLabel {
+                        background-color: #F8F9FA;
+                        border-radius: 4px;
+                        padding: 4px;
+                    }
+                """)
+                self.manga_table.setCellWidget(row, 0, image_label)
 
                 cover_url = ""
                 if isinstance(manga.get('cover'), dict):
@@ -491,36 +572,40 @@ class MangaDownloaderApp(QMainWindow):
                 slug_item.setData(Qt.ItemDataRole.UserRole, manga['slug_url'])
                 self.manga_table.setItem(row, 4, slug_item)
 
-            # Настроим столбец обложки так, чтобы он подстраивался под содержимое
-            self.manga_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            self.manga_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            self.manga_table.resizeColumnsToContents()
+            # Настройка внешнего вида таблицы
+            self.manga_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
+            self.manga_table.verticalHeader().setDefaultSectionSize(row_height)
+            self.manga_table.setShowGrid(False)
 
         except Exception as e:
             print(f"Display error: {str(e)}")
 
     def show_context_menu(self, pos):
         try:
-            logging.debug(f"Context menu requested at position: {pos}")
             item = self.manga_table.itemAt(pos)
-
             if not item:
-                logging.warning("No item at clicked position")
                 return
 
-            current_col = self.manga_table.currentColumn()
-            logging.debug(f"Current column: {current_col}")
+            row = self.manga_table.rowAt(pos.y())
+            slug_url = self.manga_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
 
-            if current_col == 4:  # Slug URL column
-                menu = QMenu()
-                copy_action = QAction("Копировать", self)
+            menu = QMenu()
+
+            # Добавляем пункт для глав в любое место таблицы
+            chapters_action = QAction("Открыть список глав", self)
+            chapters_action.triggered.connect(lambda: self.load_chapters(slug_url))
+            menu.addAction(chapters_action)
+
+            # Для колонки slug URL добавляем копирование
+            if self.manga_table.columnAt(pos.x()) == 4:
+                copy_action = QAction("Копировать Slug URL", self)
                 copy_action.triggered.connect(lambda: self.copy_to_clipboard(item.text()))
                 menu.addAction(copy_action)
-                menu.exec(self.manga_table.viewport().mapToGlobal(pos))
-                logging.debug("Context menu executed successfully")
+
+            menu.exec(self.manga_table.viewport().mapToGlobal(pos))
 
         except Exception as e:
-            logging.error("Error in context menu:", exc_info=True)
+            logger.error(f"Context menu error: {str(e)}")
             QMessageBox.critical(self, "Ошибка", f"Ошибка в контекстном меню:\n{str(e)}")
 
     def copy_to_clipboard(self, text):
@@ -534,34 +619,96 @@ class MangaDownloaderApp(QMainWindow):
             logging.error("Clipboard error:", exc_info=True)
             QMessageBox.critical(self, "Ошибка", f"Ошибка копирования:\n{str(e)}")
 
-    def update_cover(self, manga_id, pixmap):
+    def update_cover(self, slug_url, pixmap):
         for row in range(self.manga_table.rowCount()):
-            if self.manga_table.item(row, 1).data(Qt.ItemDataRole.UserRole) == manga_id:
-                self.manga_table.cellWidget(row, 0).setPixmap(pixmap)
+            if self.manga_table.item(row, 1).data(Qt.ItemDataRole.UserRole) == slug_url:
+                label = self.manga_table.cellWidget(row, 0)
+                if isinstance(label, QLabel):
+                    # Масштабируем изображение с сохранением пропорций
+                    scaled_pixmap = pixmap.scaled(
+                        label.width(), label.height(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    label.setPixmap(scaled_pixmap)
+
+                    # Центрируем изображение
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 break
 
-    def select_manga(self, index):
-        selected_row = index.row()
-        slug_url = self.manga_table.item(selected_row, 1).data(Qt.ItemDataRole.UserRole)
-        manga = self.manga_cache.get(slug_url)
+    # Добавим новые методы для загрузки и отображения глав
+    def load_chapters(self, slug_url):
+        self.log_message(f"[{datetime.now().strftime('%H:%M:%S')}] Загрузка глав...", "info")
+        thread = ChaptersLoaderThread(slug_url)
+        thread.chapters_loaded.connect(self.show_chapters_dialog)
+        thread.error_occurred.connect(lambda e: self.log_message(e, "error"))
 
-        if manga:
-            self.slug_input.setText(manga['slug_url'])
+        # Добавляем проверку перед удалением
+        def safe_remove():
+            if thread in self.chapter_threads:
+                self.chapter_threads.remove(thread)
 
-            # Показываем превью
-            preview_dialog = QDialog(self)
-            preview_dialog.setWindowTitle("Превью обложки")
-            layout = QVBoxLayout(preview_dialog)
+        thread.finished.connect(safe_remove)  # Используем функцию с проверкой
+        self.chapter_threads.append(thread)
+        thread.start()
 
-            pixmap = QPixmap()
-            if self.manga_table.cellWidget(selected_row, 0).pixmap():
-                pixmap = self.manga_table.cellWidget(selected_row, 0).pixmap()
+    def show_chapters_dialog(self, chapters):
+        dialog = ChaptersDialog(self)
 
-            preview_label = QLabel()
-            preview_label.setPixmap(pixmap.scaled(300, 450, Qt.AspectRatioMode.KeepAspectRatio))
-            layout.addWidget(preview_label)
+        # Группируем главы по томам
+        volumes = {}
+        for chapter in chapters:
+            vol = chapter.get('volume', 'Без тома')
+            if vol not in volumes:
+                volumes[vol] = []
+            volumes[vol].append(chapter)
 
-            preview_dialog.exec()
+        # Заполняем дерево
+        for volume, chapters in volumes.items():
+            volume_item = QTreeWidgetItem(dialog.tree, [str(volume)])
+            for chap in chapters:
+                chapter_number = chap.get('number', 'N/A')
+                name = chap.get('name', 'Без названия') or 'Без названия'
+                QTreeWidgetItem(volume_item, [str(volume), chapter_number, name])
+
+        dialog.tree.expandAll()
+        dialog.exec()
+
+
+# Добавим новый класс потока для загрузки глав
+class ChaptersLoaderThread(QThread):
+    chapters_loaded = pyqtSignal(list)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, slug_url):
+        super().__init__()
+        self.slug_url = slug_url
+
+    def run(self):
+        try:
+            url = f"https://api.lib.social/api/manga/{self.slug_url}/chapters"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            self.chapters_loaded.emit(data.get('data', []))
+        except Exception as e:
+            self.error_occurred.emit(f"Ошибка загрузки глав: {str(e)}")
+        finally:
+            self.finished.emit()  # Добавьте этот вызов в блок finally
+
+
+# Добавим новый диалог для отображения глав
+class ChaptersDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Тома и главы")
+        self.setMinimumSize(600, 400)
+
+        layout = QVBoxLayout(self)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Том", "Глава", "Название"])
+        self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.tree)
 
 
 if __name__ == "__main__":
